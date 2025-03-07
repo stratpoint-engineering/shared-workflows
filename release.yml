@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/**'
+      - 'CHANGELOG.md'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Get version from changelog
+      id: version
+      run: |
+        VERSION=$(grep -m 1 "## \[" CHANGELOG.md | sed 's/## \[\(.*\)\].*/\1/')
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+    
+    - name: Create Release
+      if: steps.version.outputs.version != ''
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ steps.version.outputs.version }}
+        name: Release v${{ steps.version.outputs.version }}
+        body_path: CHANGELOG.md
+        draft: false
+        prerelease: false

@@ -1,0 +1,225 @@
+name: Java Base CI
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: 'Java version to use'
+        required: false
+        default: '17'
+        type: string
+      distribution:
+        description: 'Java distribution (temurin, adopt, zulu, etc.)'
+        required: false
+        default: 'temurin'
+        type: string
+      working-directory:
+        description: 'Directory containing the Java project'
+        required: false
+        default: '.'
+        type: string
+      build-tool:
+        description: 'Build tool (maven, gradle)'
+        required: false
+        default: 'maven'
+        type: string
+      test-command:
+        description: 'Custom test command'
+        required: false
+        type: string
+      skip-tests:
+        description: 'Skip running tests'
+        required: false
+        default: false
+        type: boolean
+      coverage-threshold:
+        description: 'Code coverage threshold percentage'
+        required: false
+        default: 80
+        type: number
+      spring-profiles:
+        description: 'Spring profiles to activate'
+        required: false
+        type: string
+      publish-artifact:
+        description: 'Whether to publish the built artifact'
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      SONAR_TOKEN:
+        required: false
+      MAVEN_SETTINGS:
+        required: false
+      GRADLE_PROPS:
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Shallow clones should be disabled for better relevancy of SonarQube analysis
+    
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: ${{ inputs.distribution }}
+        cache: ${{ inputs.build-tool }}
+    
+    - name: Setup Maven settings
+      if: inputs.build-tool == 'maven' && secrets.MAVEN_SETTINGS != ''
+      run: |
+        mkdir -p ~/.m2
+        echo "${{ secrets.MAVEN_SETTINGS }}" > ~/.m2/settings.xml
+    
+    - name: Setup Gradle properties
+      if: inputs.build-tool == 'gradle' && secrets.GRADLE_PROPS != ''
+      run: |
+        mkdir -p ~/.gradle
+        echo "${{ secrets.GRADLE_PROPS }}" > ~/.gradle/gradle.properties
+    
+    - name: Cache SonarQube packages
+      if: secrets.SONAR_TOKEN != ''
+      uses: actions/cache@v4
+      with:
+        path: ~/.sonar/cache
+        key: ${{ runner.os }}-sonar
+        restore-keys: ${{ runner.os }}-sonar
+    
+    - name: Validate Maven project
+      if: inputs.build-tool == 'maven'
+      working-directory: ${{ inputs.working-directory }}
+      run: mvn -B validate
+
+    - name: Validate Gradle project
+      if: inputs.build-tool == 'gradle'
+      working-directory: ${{ inputs.working-directory }}
+      run: ./gradlew tasks
+
+    - name: Build with Maven
+      if: inputs.build-tool == 'maven'
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        MAVEN_OPTS="-Xmx2048m"
+        if [ "${{ inputs.skip-tests }}" = "true" ]; then
+          mvn -B clean package -DskipTests
+        else
+          mvn -B clean package
+        fi
+      env:
+        SPRING_PROFILES_ACTIVE: ${{ inputs.spring-profiles || 'test' }}
+
+    - name: Build with Gradle
+      if: inputs.build-tool == 'gradle'
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ "${{ inputs.skip-tests }}" = "true" ]; then
+          ./gradlew clean build -x test
+        else
+          ./gradlew clean build
+        fi
+      env:
+        SPRING_PROFILES_ACTIVE: ${{ inputs.spring-profiles || 'test' }}
+
+    - name: Run custom tests
+      if: inputs.skip-tests != true && inputs.test-command != ''
+      working-directory: ${{ inputs.working-directory }}
+      run: ${{ inputs.test-command }}
+      env:
+        SPRING_PROFILES_ACTIVE: ${{ inputs.spring-profiles || 'test' }}
+
+    - name: Run Maven tests with coverage
+      if: inputs.skip-tests != true && inputs.build-tool == 'maven' && inputs.test-command == ''
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        mvn -B test org.jacoco:jacoco-maven-plugin:report
+        
+        # Check coverage threshold
+        ACTUAL_COVERAGE=$(awk -F"," '{ instructions += $4 + $5; covered += $5 } END { print 100 * covered / instructions }' target/site/jacoco/jacoco.csv)
+        if (( $(echo "$ACTUAL_COVERAGE < ${{ inputs.coverage-threshold }}" | bc -l) )); then
+          echo "Code coverage is below threshold. Required: ${{ inputs.coverage-threshold }}%, Actual: $ACTUAL_COVERAGE%"
+          exit 1
+        fi
+        
+    - name: Run Gradle tests with coverage
+      if: inputs.skip-tests != true && inputs.build-tool == 'gradle' && inputs.test-command == ''
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        ./gradlew jacocoTestReport
+        
+        # Check coverage threshold
+        REPORT_PATH=build/reports/jacoco/test/jacocoTestReport.xml
+        ACTUAL_COVERAGE=$(awk -F'"' '/<counter type="INSTRUCTION"/{covered=$4; missed=$6; total=covered+missed; print 100*covered/total; exit}' $REPORT_PATH)
+        if (( $(echo "$ACTUAL_COVERAGE < ${{ inputs.coverage-threshold }}" | bc -l) )); then
+          echo "Code coverage is below threshold. Required: ${{ inputs.coverage-threshold }}%, Actual: $ACTUAL_COVERAGE%"
+          exit 1
+        fi
+
+    - name: SonarQube analysis
+      if: secrets.SONAR_TOKEN != ''
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      run: |
+        if [ "${{ inputs.build-tool }}" = "maven" ]; then
+          mvn -B org.sonarsource.scanner.maven:sonar-maven-plugin:sonar
+        else
+          ./gradlew sonar
+        fi
+
+    - name: Check for dependency vulnerabilities
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ "${{ inputs.build-tool }}" = "maven" ]; then
+          mvn -B org.owasp:dependency-check-maven:check
+        else
+          ./gradlew dependencyCheckAnalyze
+        fi
+      continue-on-error: true
+
+    - name: Check code style
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ "${{ inputs.build-tool }}" = "maven" ]; then
+          mvn -B checkstyle:check
+        else
+          ./gradlew checkstyleMain
+        fi
+      continue-on-error: true
+
+    - name: Archive test results
+      if: always() && inputs.skip-tests != true
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: |
+          ${{ inputs.working-directory }}/target/surefire-reports/
+          ${{ inputs.working-directory }}/build/reports/tests/
+        retention-days: 5
+
+    - name: Archive code coverage
+      if: always() && inputs.skip-tests != true
+      uses: actions/upload-artifact@v4
+      with:
+        name: code-coverage
+        path: |
+          ${{ inputs.working-directory }}/target/site/jacoco/
+          ${{ inputs.working-directory }}/build/reports/jacoco/
+        retention-days: 5
+
+    - name: Publish artifact
+      if: inputs.publish-artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-artifact
+        path: |
+          ${{ inputs.working-directory }}/target/*.jar
+          ${{ inputs.working-directory }}/target/*.war
+          ${{ inputs.working-directory }}/build/libs/*.jar
+          ${{ inputs.working-directory }}/build/libs/*.war
+        retention-days: 7

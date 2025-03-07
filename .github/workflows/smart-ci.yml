@@ -1,0 +1,83 @@
+name: Smart CI/CD
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    outputs:
+      is-monorepo: ${{ steps.analysis.outputs.is-monorepo }}
+      package-manager: ${{ steps.analysis.outputs.package-manager }}
+      frameworks: ${{ steps.analysis.outputs.frameworks }}
+      languages: ${{ steps.analysis.outputs.languages }}
+      has-docker: ${{ steps.analysis.outputs.has-docker }}
+      workspaces: ${{ steps.analysis.outputs.workspaces }}
+      database-type: ${{ steps.analysis.outputs.database-type }}
+      test-framework: ${{ steps.analysis.outputs.test-framework }}
+      
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Analyze Project
+        id: analysis
+        uses: org-name/shared-workflows/.github/actions/project-analyzer@v1
+
+  build-node:
+    needs: analyze
+    if: contains(fromJSON(needs.analyze.outputs.languages), 'typescript') || contains(fromJSON(needs.analyze.outputs.frameworks), 'react') || contains(fromJSON(needs.analyze.outputs.frameworks), 'vue') || contains(fromJSON(needs.analyze.outputs.frameworks), 'angular')
+    strategy:
+      matrix:
+        workspace: ${{ fromJSON(needs.analyze.outputs.is-monorepo && needs.analyze.outputs.workspaces != '[]' && needs.analyze.outputs.workspaces || '[\"."]') }}
+    uses: org-name/shared-workflows/.github/workflows/node-base.yml@v1
+    with:
+      package-manager: ${{ needs.analyze.outputs.package-manager }}
+      working-directory: ${{ matrix.workspace }}
+      
+  build-python:
+    needs: analyze
+    if: contains(fromJSON(needs.analyze.outputs.languages), 'python')
+    uses: org-name/shared-workflows/.github/workflows/python-base.yml@v1
+    with:
+      framework: ${{ contains(fromJSON(needs.analyze.outputs.frameworks), 'django') && 'django' || contains(fromJSON(needs.analyze.outputs.frameworks), 'fastapi') && 'fastapi' || contains(fromJSON(needs.analyze.outputs.frameworks), 'flask') && 'flask' || '' }}
+      
+  build-java:
+    needs: analyze
+    if: contains(fromJSON(needs.analyze.outputs.languages), 'java') || contains(fromJSON(needs.analyze.outputs.languages), 'kotlin')
+    uses: org-name/shared-workflows/.github/workflows/java-base.yml@v1
+    with:
+      framework: ${{ contains(fromJSON(needs.analyze.outputs.frameworks), 'spring-boot') && 'spring-boot' || '' }}
+      language: ${{ contains(fromJSON(needs.analyze.outputs.languages), 'kotlin') && 'kotlin' || 'java' }}
+      
+  build-go:
+    needs: analyze
+    if: contains(fromJSON(needs.analyze.outputs.languages), 'go')
+    uses: org-name/shared-workflows/.github/workflows/go-base.yml@v1
+      
+  docker:
+    needs: [analyze, build-node, build-python, build-java, build-go]
+    if: |
+      needs.analyze.outputs.has-docker == 'true' && 
+      github.ref == 'refs/heads/main'
+    uses: org-name/shared-workflows/.github/workflows/docker.yml@v1
+    with:
+      image-name: ${{ github.repository }}
+    secrets:
+      REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+      REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+      
+  deploy:
+    needs: [analyze, docker]
+    if: github.ref == 'refs/heads/main'
+    uses: org-name/shared-workflows/.github/workflows/deploy.yml@v1
+    with:
+      environment: 'production'
+      needs-aws: true
+      database-type: ${{ needs.analyze.outputs.database-type }}
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}

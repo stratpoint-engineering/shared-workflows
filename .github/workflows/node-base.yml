@@ -1,0 +1,418 @@
+name: Node.js Base CI
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node.js version to use'
+        required: false
+        default: '20.x'
+        type: string
+      package-manager:
+        description: 'Package manager (npm, yarn, pnpm)'
+        required: false
+        default: 'npm'
+        type: string
+      working-directory:
+        description: 'Directory containing the Node.js project'
+        required: false
+        default: '.'
+        type: string
+      project-type:
+        description: 'Project type (backend, frontend, fullstack)'
+        required: false
+        default: 'fullstack'
+        type: string
+      build-command:
+        description: 'Custom build command'
+        required: false
+        type: string
+      test-command:
+        description: 'Custom test command'
+        required: false
+        type: string
+      lint-command:
+        description: 'Custom lint command'
+        required: false
+        type: string
+      e2e-command:
+        description: 'Custom E2E test command'
+        required: false
+        type: string
+      skip-lint:
+        description: 'Skip linting'
+        required: false
+        default: false
+        type: boolean
+      skip-tests:
+        description: 'Skip tests'
+        required: false
+        default: false
+        type: boolean
+      skip-e2e:
+        description: 'Skip E2E tests'
+        required: false
+        default: true
+        type: boolean
+      skip-build:
+        description: 'Skip build'
+        required: false
+        default: false
+        type: boolean
+      coverage-threshold:
+        description: 'Code coverage threshold percentage'
+        required: false
+        default: 80
+        type: number
+      publish-artifact:
+        description: 'Whether to publish the built artifact'
+        required: false
+        default: false
+        type: boolean
+      run-lighthouse:
+        description: 'Run Lighthouse audits for frontend'
+        required: false
+        default: false
+        type: boolean
+      env-vars:
+        description: 'Environment variables as JSON string'
+        required: false
+        type: string
+    secrets:
+      SONAR_TOKEN:
+        required: false
+      NPM_TOKEN:
+        required: false
+      CODECOV_TOKEN:
+        required: false
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      cache-hit: ${{ steps.cache-deps.outputs.cache-hit }}
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Important for SonarQube analysis
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        registry-url: 'https://registry.npmjs.org'
+    
+    - name: Setup pnpm
+      if: inputs.package-manager == 'pnpm'
+      uses: pnpm/action-setup@v2
+      with:
+        version: latest
+        
+    - name: Determine lockfile
+      id: lockfile
+      run: |
+        if [ "${{ inputs.package-manager }}" = "npm" ]; then
+          echo "lockfile=package-lock.json" >> $GITHUB_OUTPUT
+          echo "cache-path=~/.npm" >> $GITHUB_OUTPUT
+        elif [ "${{ inputs.package-manager }}" = "yarn" ]; then
+          echo "lockfile=yarn.lock" >> $GITHUB_OUTPUT
+          echo "cache-path=.yarn/cache" >> $GITHUB_OUTPUT
+        else
+          echo "lockfile=pnpm-lock.yaml" >> $GITHUB_OUTPUT
+          echo "cache-path=~/.pnpm-store" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Cache dependencies
+      id: cache-deps
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.lockfile.outputs.cache-path }}
+        key: ${{ runner.os }}-${{ inputs.package-manager }}-${{ hashFiles(format('{0}/{1}', inputs.working-directory, steps.lockfile.outputs.lockfile)) }}
+        restore-keys: |
+          ${{ runner.os }}-${{ inputs.package-manager }}-
+    
+    - name: Install dependencies
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ "${{ inputs.package-manager }}" = "yarn" ]; then
+          yarn install --frozen-lockfile
+        elif [ "${{ inputs.package-manager }}" = "pnpm" ]; then
+          pnpm install --frozen-lockfile
+        else
+          npm ci
+        fi
+      env:
+        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        ${{ inputs.env-vars && format('ENV_VARS={0}', inputs.env-vars) || '' }}
+  
+  lint:
+    needs: setup
+    if: inputs.skip-lint != true
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+    
+    - name: Setup pnpm
+      if: inputs.package-manager == 'pnpm'
+      uses: pnpm/action-setup@v2
+      
+    - name: Restore cached dependencies
+      uses: actions/cache@v4
+      with:
+        path: ${{ needs.setup.outputs.cache-path }}
+        key: ${{ runner.os }}-${{ inputs.package-manager }}-${{ hashFiles(format('{0}/{1}', inputs.working-directory, needs.setup.outputs.lockfile)) }}
+    
+    - name: Install ESLint if needed
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if ! ${{ inputs.package-manager }} list | grep -q eslint; then
+          ${{ inputs.package-manager }} ${{ inputs.package-manager == 'npm' && 'install' || 'add' }} -D eslint
+        fi
+      
+    - name: Run linting
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ -n "${{ inputs.lint-command }}" ]; then
+          ${{ inputs.lint-command }}
+        elif [ -f "package.json" ] && grep -q '"lint"' package.json; then
+          ${{ inputs.package-manager }} run lint
+        else
+          ${{ inputs.package-manager }} exec eslint . --ext .js,.jsx,.ts,.tsx
+        fi
+  
+  test:
+    needs: setup
+    if: inputs.skip-tests != true
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+    
+    - name: Setup pnpm
+      if: inputs.package-manager == 'pnpm'
+      uses: pnpm/action-setup@v2
+      
+    - name: Restore cached dependencies
+      uses: actions/cache@v4
+      with:
+        path: ${{ needs.setup.outputs.cache-path }}
+        key: ${{ runner.os }}-${{ inputs.package-manager }}-${{ hashFiles(format('{0}/{1}', inputs.working-directory, needs.setup.outputs.lockfile)) }}
+    
+    - name: Run tests
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ -n "${{ inputs.test-command }}" ]; then
+          ${{ inputs.test-command }}
+        elif [ -f "package.json" ] && grep -q '"test"' package.json; then
+          ${{ inputs.package-manager }} test -- --coverage
+        else
+          echo "No test command specified and no 'test' script found in package.json"
+          exit 1
+        fi
+      env:
+        ${{ inputs.env-vars && format('ENV_VARS={0}', inputs.env-vars) || '' }}
+        
+    - name: Check coverage threshold
+      if: inputs.project-type != 'frontend' || inputs.coverage-threshold > 0
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ -d "coverage" ]; then
+          if [ -f "coverage/coverage-summary.json" ]; then
+            COVERAGE=$(jq '.total.lines.pct' coverage/coverage-summary.json)
+          elif [ -f "coverage/lcov.info" ]; then
+            COVERAGE=$(node -e "const fs = require('fs'); const data = fs.readFileSync('coverage/lcov.info', 'utf8'); const lines = data.split('\n'); const linesHit = lines.filter(l => l.startsWith('LH:')).map(l => parseInt(l.split(':')[1])).reduce((a, b) => a + b, 0); const linesTotal = lines.filter(l => l.startsWith('LF:')).map(l => parseInt(l.split(':')[1])).reduce((a, b) => a + b, 0); console.log(linesHit / linesTotal * 100);")
+          fi
+          
+          if (( $(echo "$COVERAGE < ${{ inputs.coverage-threshold }}" | bc -l) )); then
+            echo "Code coverage is below threshold. Required: ${{ inputs.coverage-threshold }}%, Actual: $COVERAGE%"
+            exit 1
+          fi
+        fi
+        
+    - name: Upload coverage reports
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: ${{ inputs.working-directory }}/coverage
+        retention-days: 7
+        
+    - name: Upload coverage to Codecov
+      if: secrets.CODECOV_TOKEN != ''
+      uses: codecov/codecov-action@v4
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        directory: ${{ inputs.working-directory }}/coverage
+        fail_ci_if_error: false
+  
+  build:
+    needs: [lint, test]
+    if: inputs.skip-build != true && (always() && !contains(needs.*.result, 'failure'))
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+    
+    - name: Setup pnpm
+      if: inputs.package-manager == 'pnpm'
+      uses: pnpm/action-setup@v2
+      
+    - name: Restore cached dependencies
+      uses: actions/cache@v4
+      with:
+        path: ${{ needs.setup.outputs.cache-path }}
+        key: ${{ runner.os }}-${{ inputs.package-manager }}-${{ hashFiles(format('{0}/{1}', inputs.working-directory, needs.setup.outputs.lockfile)) }}
+    
+    - name: Build project
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ -n "${{ inputs.build-command }}" ]; then
+          ${{ inputs.build-command }}
+        elif [ -f "package.json" ] && grep -q '"build"' package.json; then
+          ${{ inputs.package-manager }} run build
+        else
+          echo "No build command specified and no 'build' script found in package.json"
+          exit 1
+        fi
+      env:
+        ${{ inputs.env-vars && format('ENV_VARS={0}', inputs.env-vars) || '' }}
+    
+    - name: Upload build artifact
+      if: inputs.publish-artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-output
+        path: |
+          ${{ inputs.working-directory }}/build
+          ${{ inputs.working-directory }}/dist
+        retention-days: 7
+  
+  e2e:
+    needs: build
+    if: inputs.skip-e2e != true && (inputs.project-type == 'frontend' || inputs.project-type == 'fullstack')
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+    
+    - name: Setup pnpm
+      if: inputs.package-manager == 'pnpm'
+      uses: pnpm/action-setup@v2
+      
+    - name: Restore cached dependencies
+      uses: actions/cache@v4
+      with:
+        path: ${{ needs.setup.outputs.cache-path }}
+        key: ${{ runner.os }}-${{ inputs.package-manager }}-${{ hashFiles(format('{0}/{1}', inputs.working-directory, needs.setup.outputs.lockfile)) }}
+    
+    - name: Install Playwright browsers
+      if: inputs.e2e-command == '' && contains(inputs.working-directory, 'playwright.config')
+      working-directory: ${{ inputs.working-directory }}
+      run: npx playwright install --with-deps
+      
+    - name: Install Cypress
+      if: inputs.e2e-command == '' && contains(inputs.working-directory, 'cypress')
+      uses: cypress-io/github-action@v6
+      with:
+        working-directory: ${{ inputs.working-directory }}
+        install: false
+        runTests: false
+    
+    - name: Run E2E tests
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        if [ -n "${{ inputs.e2e-command }}" ]; then
+          ${{ inputs.e2e-command }}
+        elif [ -f "package.json" ] && grep -q '"e2e"' package.json; then
+          ${{ inputs.package-manager }} run e2e
+        elif [ -f "playwright.config.ts" ] || [ -f "playwright.config.js" ]; then
+          npx playwright test
+        elif [ -d "cypress" ]; then
+          npx cypress run
+        else
+          echo "No E2E test command specified and no recognized E2E setup found"
+          exit 1
+        fi
+      env:
+        ${{ inputs.env-vars && format('ENV_VARS={0}', inputs.env-vars) || '' }}
+  
+  lighthouse:
+    needs: build
+    if: inputs.run-lighthouse && (inputs.project-type == 'frontend' || inputs.project-type == 'fullstack')
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download build artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: build-output
+        path: ${{ inputs.working-directory }}/build
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+    
+    - name: Install serve
+      run: npm install -g serve
+    
+    - name: Serve built app
+      run: |
+        serve -s ${{ inputs.working-directory }}/build -l 8080 &
+        sleep 5
+      
+    - name: Run Lighthouse CI
+      uses: treosh/lighthouse-ci-action@v10
+      with:
+        urls: |
+          http://localhost:8080/
+        uploadArtifacts: true
+        temporaryPublicStorage: true
+        
+  sonarqube:
+    needs: [test, build]
+    if: secrets.SONAR_TOKEN != '' && (always() && !contains(needs.*.result, 'failure'))
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Download coverage reports
+      uses: actions/download-artifact@v4
+      with:
+        name: coverage-report
+        path: ${{ inputs.working-directory }}/coverage
+    
+    - name: SonarQube Scan
+      uses: SonarSource/sonarcloud-github-action@master
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      with:
+        projectBaseDir: ${{ inputs.working-directory }}

@@ -1,0 +1,180 @@
+# action.yml
+name: 'Project Analyzer'
+description: 'Analyzes project structure and tech stack'
+
+outputs:
+  is-monorepo:
+    description: 'Whether the project is a monorepo'
+    value: ${{ steps.analyze.outputs.is-monorepo }}
+  package-manager:
+    description: 'Detected package manager (npm, yarn, pnpm)'
+    value: ${{ steps.analyze.outputs.package-manager }}
+  frameworks:
+    description: 'Detected frameworks as JSON array'
+    value: ${{ steps.analyze.outputs.frameworks }}
+  languages:
+    description: 'Detected programming languages as JSON array'
+    value: ${{ steps.analyze.outputs.languages }}
+  has-docker:
+    description: 'Whether project contains Dockerfile'
+    value: ${{ steps.analyze.outputs.has-docker }}
+  workspaces:
+    description: 'List of workspace paths in monorepo'
+    value: ${{ steps.analyze.outputs.workspaces }}
+  database-type:
+    description: 'Detected database type'
+    value: ${{ steps.analyze.outputs.database-type }}
+  test-framework:
+    description: 'Detected test framework'
+    value: ${{ steps.analyze.outputs.test-framework }}
+
+runs:
+  using: composite
+  steps:
+    - name: Analyze Project Structure
+      id: analyze
+      shell: bash
+      run: |
+        # Initialize outputs
+        echo "is-monorepo=false" >> $GITHUB_OUTPUT
+        echo "package-manager=npm" >> $GITHUB_OUTPUT
+        echo "frameworks=[]" >> $GITHUB_OUTPUT
+        echo "languages=[]" >> $GITHUB_OUTPUT
+        echo "has-docker=false" >> $GITHUB_OUTPUT
+        echo "workspaces=[]" >> $GITHUB_OUTPUT
+        echo "database-type=unknown" >> $GITHUB_OUTPUT
+        echo "test-framework=unknown" >> $GITHUB_OUTPUT
+        
+        # Detect monorepo
+        if [ -f "pnpm-workspace.yaml" ] || [ -f "lerna.json" ] || \
+           [ -f "rush.json" ] || [ -f "nx.json" ] || \
+           ([ -f "package.json" ] && grep -q "\"workspaces\"" package.json); then
+          echo "is-monorepo=true" >> $GITHUB_OUTPUT
+          
+          # Extract workspace paths
+          if [ -f "pnpm-workspace.yaml" ]; then
+            WORKSPACES=$(grep "packages:" -A 10 pnpm-workspace.yaml | grep -v "packages:" | grep -v "^-" | tr -d ' ' | jq -R -s -c 'split("\n")')
+          elif [ -f "package.json" ]; then
+            WORKSPACES=$(jq -r '.workspaces[]' package.json | jq -R -s -c 'split("\n")')
+          fi
+          echo "workspaces=$WORKSPACES" >> $GITHUB_OUTPUT
+        fi
+        
+        # Detect package manager
+        if [ -f "pnpm-lock.yaml" ]; then
+          echo "package-manager=pnpm" >> $GITHUB_OUTPUT
+        elif [ -f "yarn.lock" ]; then
+          echo "package-manager=yarn" >> $GITHUB_OUTPUT
+        fi
+        
+        # Detect frameworks and languages
+        FRAMEWORKS=()
+        LANGUAGES=()
+        
+        # Check package.json for dependencies
+        if [ -f "package.json" ]; then
+          # React
+          if grep -q "\"react\":" package.json; then
+            FRAMEWORKS+=("react")
+            # Next.js
+            if grep -q "\"next\":" package.json; then
+              FRAMEWORKS+=("nextjs")
+            fi
+          fi
+          
+          # Vue
+          if grep -q "\"vue\":" package.json; then
+            FRAMEWORKS+=("vue")
+            # Nuxt
+            if grep -q "\"nuxt\":" package.json; then
+              FRAMEWORKS+=("nuxt")
+            fi
+          fi
+          
+          # Angular
+          if grep -q "\"@angular/core\":" package.json; then
+            FRAMEWORKS+=("angular")
+          fi
+          
+          # Test frameworks
+          if grep -q "\"jest\":" package.json; then
+            echo "test-framework=jest" >> $GITHUB_OUTPUT
+          elif grep -q "\"vitest\":" package.json; then
+            echo "test-framework=vitest" >> $GITHUB_OUTPUT
+          elif grep -q "\"mocha\":" package.json; then
+            echo "test-framework=mocha" >> $GITHUB_OUTPUT
+          fi
+          
+          # TypeScript
+          if grep -q "\"typescript\":" package.json; then
+            LANGUAGES+=("typescript")
+          fi
+        fi
+        
+        # Python detection
+        if [ -f "requirements.txt" ] || [ -f "pyproject.toml" ] || [ -f "Pipfile" ]; then
+          LANGUAGES+=("python")
+          
+          # Django
+          if [ -f "manage.py" ] || grep -q "django" requirements.txt 2>/dev/null; then
+            FRAMEWORKS+=("django")
+          fi
+          
+          # Flask
+          if grep -q "flask" requirements.txt 2>/dev/null || grep -q "Flask" pyproject.toml 2>/dev/null; then
+            FRAMEWORKS+=("flask")
+          fi
+          
+          # FastAPI
+          if grep -q "fastapi" requirements.txt 2>/dev/null || grep -q "fastapi" pyproject.toml 2>/dev/null; then
+            FRAMEWORKS+=("fastapi")
+          fi
+        fi
+        
+        # Go detection
+        if [ -f "go.mod" ]; then
+          LANGUAGES+=("go")
+        fi
+        
+        # Ruby detection
+        if [ -f "Gemfile" ]; then
+          LANGUAGES+=("ruby")
+          # Rails
+          if grep -q "rails" Gemfile 2>/dev/null; then
+            FRAMEWORKS+=("rails")
+          fi
+        fi
+        
+        # Java/Kotlin detection
+        if [ -f "pom.xml" ] || [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
+          if [ -d "src/main/java" ]; then
+            LANGUAGES+=("java")
+          fi
+          if [ -d "src/main/kotlin" ]; then
+            LANGUAGES+=("kotlin")
+          fi
+          # Spring
+          if grep -q "spring-boot" pom.xml 2>/dev/null || grep -q "spring-boot" build.gradle 2>/dev/null; then
+            FRAMEWORKS+=("spring-boot")
+          fi
+        fi
+        
+        # Docker detection
+        if [ -f "Dockerfile" ] || [ -f "docker-compose.yml" ] || [ -f "docker-compose.yaml" ]; then
+          echo "has-docker=true" >> $GITHUB_OUTPUT
+        fi
+        
+        # Database detection
+        if [ -f "docker-compose.yml" ] || [ -f "docker-compose.yaml" ]; then
+          if grep -q "postgres\|postgresql" docker-compose.yml 2>/dev/null; then
+            echo "database-type=postgresql" >> $GITHUB_OUTPUT
+          elif grep -q "mysql" docker-compose.yml 2>/dev/null; then
+            echo "database-type=mysql" >> $GITHUB_OUTPUT
+          elif grep -q "mongodb" docker-compose.yml 2>/dev/null; then
+            echo "database-type=mongodb" >> $GITHUB_OUTPUT
+          fi
+        fi
+        
+        # Convert arrays to JSON
+        echo "frameworks=$(printf '%s\n' "${FRAMEWORKS[@]}" | jq -R . | jq -s .)" >> $GITHUB_OUTPUT
+        echo "languages=$(printf '%s\n' "${LANGUAGES[@]}" | jq -R . | jq -s .)" >> $GITHUB_OUTPUT

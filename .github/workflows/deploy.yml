@@ -1,0 +1,56 @@
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: string
+      deploy-command:
+        description: 'Custom deployment command'
+        required: false
+        type: string
+      aws-region:
+        description: 'AWS region'
+        required: false
+        type: string
+      needs-aws:
+        description: 'Whether AWS credentials are needed'
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+      DEPLOY_KEY:
+        required: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Configure AWS Credentials
+      if: inputs.needs-aws
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ inputs.aws-region }}
+    
+    - name: Deploy
+      env:
+        DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+      run: |
+        if [ -n "${{ inputs.deploy-command }}" ]; then
+          ${{ inputs.deploy-command }}
+        else
+          echo "No deployment command specified"
+          exit 1
+        fi

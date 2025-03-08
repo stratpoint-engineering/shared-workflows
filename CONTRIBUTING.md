@@ -9,7 +9,7 @@ We welcome contributions to improve these workflows. Here are the steps to contr
 
 2. **Clone your fork**: Clone the forked repository to your local machine using the following command:
     ```bash
-    git clone https://github.com/your-username/shared-workflows.git
+    git clone https://github.com/stratpoint-engineering/shared-workflows.git
     cd shared-workflows
     ```
 

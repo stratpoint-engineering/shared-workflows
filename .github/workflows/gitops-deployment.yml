@@ -1,0 +1,170 @@
+name: GitOps Deployment
+
+on:
+  workflow_call:
+    inputs:
+      manifests-repo:
+        required: true
+        type: string
+        description: 'Repository containing Kubernetes manifests (org/repo)'
+      app-path:
+        required: true
+        type: string
+        description: 'Path in the manifests repository where application manifests are located'
+      image-name:
+        required: true
+        type: string
+        description: 'Container image name to update'
+      image-tag:
+        required: true
+        type: string
+        description: 'New container image tag'
+      env:
+        required: false
+        type: string
+        default: 'staging'
+        description: 'Environment to deploy to (e.g., staging, production)'
+      pr-based:
+        required: false
+        type: boolean
+        default: false
+        description: 'Create PR instead of direct commit'
+      pr-reviewers:
+        required: false
+        type: string
+        description: 'Comma-separated list of GitHub usernames to request as reviewers'
+      kustomize-version:
+        required: false
+        type: string
+        default: '5.1.1'
+        description: 'Version of Kustomize to use'
+    secrets:
+      GIT_TOKEN:
+        required: true
+        description: 'Token with write access to the manifests repository'
+
+jobs:
+  update-manifests:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout manifests repository
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.manifests-repo }}
+        token: ${{ secrets.GIT_TOKEN }}
+        ref: main
+        fetch-depth: 0
+        
+    - name: Setup Kustomize
+      uses: kubernetes-sigs/setup-kustomize@v2
+      with:
+        version: ${{ inputs.kustomize-version }}
+      
+    - name: Install yq
+      run: |
+        wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+        chmod +x /usr/local/bin/yq
+        
+    - name: Update image in manifests
+      id: update-manifests
+      run: |
+        # Go to the environment directory
+        cd ${{ inputs.app-path }}/overlays/${{ inputs.env }}
+        
+        # Store original file for comparison
+        if [ -f "kustomization.yaml" ]; then
+          cp kustomization.yaml kustomization.yaml.original
+        fi
+        
+        # Method 1: If using kustomization.yaml with images section
+        if [ -f "kustomization.yaml" ] && grep -q "images:" kustomization.yaml; then
+          echo "Updating image in kustomization.yaml..."
+          kustomize edit set image ${{ inputs.image-name }}=${{ inputs.image-name }}:${{ inputs.image-tag }}
+        fi
+        
+        # Method 2: If using Helm values
+        if [ -f "values.yaml" ]; then
+          echo "Updating image tag in values.yaml..."
+          yq -i '.image.tag = "${{ inputs.image-tag }}"' values.yaml
+        fi
+        
+        # Method 3: If using plain deployment YAML
+        if [ -f "deployment.yaml" ] || [ -f "config.yaml" ]; then
+          for file in deployment.yaml config.yaml; do
+            if [ -f "$file" ]; then
+              echo "Updating image in $file..."
+              # Find container by image name pattern and update its image
+              yq -i '.spec.template.spec.containers[] |= select(.image | test("${{ inputs.image-name }}")) .image = "${{ inputs.image-name }}:${{ inputs.image-tag }}"' $file
+            fi
+          done
+        fi
+        
+        # Check if there are changes
+        CHANGES=0
+        if [ -f "kustomization.yaml.original" ]; then
+          if ! diff -q kustomization.yaml kustomization.yaml.original > /dev/null; then
+            CHANGES=1
+          fi
+          rm kustomization.yaml.original
+        else
+          # If we didn't check kustomization.yaml, assume changes were made
+          if [ -n "$(git status --porcelain)" ]; then
+            CHANGES=1
+          fi
+        fi
+        
+        if [ "$CHANGES" -eq "0" ]; then
+          echo "No changes detected in manifests."
+          echo "changes_detected=false" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        
+        # Create commit message
+        echo "changes_detected=true" >> $GITHUB_OUTPUT
+        echo "commit_message=Update ${{ inputs.image-name }} to ${{ inputs.image-tag }} in ${{ inputs.env }}" >> $GITHUB_OUTPUT
+        
+        # Configure Git
+        git config user.name "GitHub Actions"
+        git config user.email "github-actions@github.com"
+    
+    - name: Create Pull Request
+      if: inputs.pr-based && steps.update-manifests.outputs.changes_detected == 'true'
+      uses: peter-evans/create-pull-request@v6
+      with:
+        token: ${{ secrets.GIT_TOKEN }}
+        commit-message: ${{ steps.update-manifests.outputs.commit_message }}
+        title: ${{ steps.update-manifests.outputs.commit_message }}
+        branch: update-${{ inputs.env }}-${{ inputs.image-tag }}
+        base: main
+        body: |
+          ## Automated Deployment Update
+          
+          This PR updates the image tag for `${{ inputs.image-name }}` to `${{ inputs.image-tag }}` in the `${{ inputs.env }}` environment.
+          
+          ### Changes
+          - Updates container image to the latest build
+          - Environment: ${{ inputs.env }}
+          
+          Automated changes by GitHub Actions workflow.
+        labels: deployment, ${{ inputs.env }}
+        reviewers: ${{ inputs.pr-reviewers }}
+        
+    - name: Direct commit
+      if: "!inputs.pr-based && steps.update-manifests.outputs.changes_detected == 'true'"
+      run: |
+        git add .
+        git commit -m "${{ steps.update-manifests.outputs.commit_message }}"
+        git push
+        
+    - name: Output Result
+      run: |
+        if [ "${{ steps.update-manifests.outputs.changes_detected }}" == "true" ]; then
+          if [ "${{ inputs.pr-based }}" == "true" ]; then
+            echo "Created PR to update ${{ inputs.image-name }} to ${{ inputs.image-tag }} in ${{ inputs.env }}"
+          else
+            echo "Pushed update for ${{ inputs.image-name }} to ${{ inputs.image-tag }} in ${{ inputs.env }}"
+          fi
+        else
+          echo "No changes needed. Image tag may already be set to ${{ inputs.image-tag }}"
+        fi
